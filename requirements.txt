@@ -1,0 +1,5 @@
+weaviate-client>=4.0.0
+confluent-kafka
+openai
+python-dotenv
+requests

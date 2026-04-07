@@ -1,0 +1,14 @@
+# Ambientes Virtuais
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Segurança (NUNCA envie isso)
+.env
+keys.json
+
+# Logs e Temporários
+*.log
+.DS_Storegit 
