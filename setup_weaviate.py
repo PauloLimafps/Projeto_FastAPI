@@ -51,6 +51,9 @@ try:
             # ID original do documento no SQL Server (para rastreabilidade entre sistemas)
             wvc.config.Property(name="original_id",
                                 data_type=wvc.config.DataType.INT),
+            # Caminho físico ou fonte do documento PDF
+            wvc.config.Property(name="fonte",
+                                data_type=wvc.config.DataType.TEXT),
         ]
     )
     print("✅ Coleção 'Documento' criada com sucesso no Weaviate (v4)!")
