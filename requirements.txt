@@ -3,3 +3,5 @@ confluent-kafka
 openai
 python-dotenv
 requests
+pymupdf
+langchain-text-splitters
