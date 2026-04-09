@@ -3,10 +3,11 @@ import weaviate                  # SDK do banco de dados vetorial Weaviate
 from fastapi import FastAPI, HTTPException, Depends   # FastAPI: framework web; HTTPException: erros HTTP padronizados; Depends: injeção de dependência
 from auth import validate_jwt                     # Middleware de segurança JWT
 from pydantic import BaseModel, ConfigDict  # BaseModel: schema de request; ConfigDict: configuração Pydantic V2
-from openai import OpenAI                    # SDK da OpenAI para geração de respostas via GPT-4o
+from openai import OpenAI                    # SDK da OpenAI para geração de embeddings
 from dotenv import load_dotenv               # Carrega variáveis do arquivo .env para o ambiente do processo
 from weaviate.classes.init import Auth       # Auth: autenticação por chave de API no Weaviate Cloud
 from contextlib import asynccontextmanager   # Para definir ciclo de vida assíncrono (startup/shutdown) da API
+from nemoguardrails import LLMRails, RailsConfig # Para a camada de segurança do LLM
 
 # Carrega as variáveis do arquivo .env para o ambiente do processo Python
 load_dotenv()
@@ -16,6 +17,7 @@ load_dotenv()
 
 # Placeholder global — a conexão será criada no startup do FastAPI (dentro do lifespan)
 client_weaviate = None
+rails_app = None
 
 # --- Gerenciador de Conexão (Resolve o ResourceWarning) ---
 # @asynccontextmanager transforma a função coroutine em um gerenciador de contexto assíncrono
@@ -29,8 +31,17 @@ async def lifespan(app: FastAPI):
     client_weaviate = weaviate.connect_to_weaviate_cloud(
         cluster_url=os.getenv("WCD_URL"),
         auth_credentials=Auth.api_key(os.getenv("WCD_API_KEY")),
-        headers={"X-OpenAI-Api-Key": os.getenv("OPENAI_API_KEY")}  # Permite vetorização interna do Weaviate
+        headers={"X-OpenAI-Api-Key": os.getenv("OPENAI_API_KEY")},  # Permite vetorização interna do Weaviate
+        skip_init_checks=True # Pula o check de saúde que estava travando o startup
     )
+    
+    # Inicializa o NeMo Guardrails
+    global rails_app
+    print("🛡️ Inicializando NeMo Guardrails...")
+    rails_config = RailsConfig.from_path("./config")
+    rails_app = LLMRails(rails_config)
+    print("✅ NeMo Guardrails ativo!")
+    
     yield  # A aplicação fica "viva" aqui, processando requisições HTTP normalmente
 
     # Código APÓS o `yield` roda no SHUTDOWN da aplicação (após parar de aceitar requisições)
@@ -44,7 +55,7 @@ async def lifespan(app: FastAPI):
 # Cria a instância da aplicação FastAPI com título descritivo e gerenciador de ciclo de vida
 app = FastAPI(title="Orquestrador RAG - CorporativoIA", lifespan=lifespan)
 
-# Cria o cliente da OpenAI — será verwendet para gerar a resposta final via GPT-4o
+# Cria o cliente da OpenAI — será verwendet para gerar embeddings
 client_openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
@@ -66,6 +77,8 @@ class ChatRequest(BaseModel):
     page_context: dict
     # Lista de matrículas/cursos em que o aluno está inscrito
     student_enrollments: list
+    # Histórico da conversa enviado pelo Moodle (JSON array de user/message)
+    history: list = []
 
 # ─── BLOCO 4: Referência ao Weaviate Cloud — conexão criada no lifespan ────────
 # (não há conexão aqui — ela é iniciada no startup do FastAPI acima)
@@ -86,15 +99,38 @@ async def chat_endpoint(request: ChatRequest, token_payload: dict = Depends(vali
         # Isso garante que o usuário logado é realmente quem diz ser no payload do JWT
         usuario_id = str(token_payload.get("sub", "desconhecido"))
         
+        # ── Step 0: Reformulação de Query (Standalone Question) ────────────────
+        # Se houver histórico, pedimos ao GPT para reescrever a pergunta de forma contextualizada
+        # Isso garante que "qual a fórmula?" se transforme em "qual a fórmula de HA vinculada ao THC?"
+        query_para_busca = request.message
+        if request.history:
+            try:
+                # Constrói um resumo rápido do histórico para o GPT contextualizar
+                resumo_conversa = "\n".join([f"{h.get('user', 'Usuário')}: {h.get('message', '')}" for h in request.history[-3:]]) # Últimas 3 interações
+                
+                reformulacao = client_openai.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "Você é um assistente técnico. Sua tarefa é reescrever a 'Pergunta Atual' do usuário em uma única frase de busca completa e independente, usando o 'Histórico da Conversa' para prover contexto. Retorne APENAS a frase reformulada, sem comentários."},
+                        {"role": "user", "content": f"Histórico:\n{resumo_conversa}\n\nPergunta Atual: {request.message}\n\nPergunta Reformulada:"}
+                    ],
+                    max_tokens=60,
+                    temperature=0
+                )
+                query_para_busca = reformulacao.choices[0].message.content.strip()
+                print(f"🔍 Query Reformulada: {query_para_busca}")
+            except Exception as re_err:
+                print(f"⚠️ Erro ao reformular query: {re_err}")
+                query_para_busca = request.message # Fallback para a original
+
         # ── Step 1: Busca Semântica no Weaviate ────────────────────────────────
         # Recupera a referência à coleção "Documento" no Weaviate Cloud
         colecao = client_weaviate.collections.get("Documento")
 
-        # Gera o embedding da pergunta via OpenAI (igual ao main.py faz nos PDFs)
-        # Necessário pois a coleção usa vectorizer_config=None (vetores externos)
+        # Gera o embedding da pergunta REFORMULADA via OpenAI (RAG de Precisão)
         res_embedding = client_openai.embeddings.create(
-            input=[request.message],
-            model="text-embedding-3-small"  # Mesmo modelo usado na ingestão (main.py)
+            input=[query_para_busca],
+            model="text-embedding-3-small"
         )
         vetor_query = res_embedding.data[0].embedding
 
@@ -110,34 +146,44 @@ async def chat_endpoint(request: ChatRequest, token_payload: dict = Depends(vali
         # Este contexto será injetado no system prompt para fundamentar a resposta do LLM
         contexto = "\n\n".join([obj.properties["conteudo"] for obj in response.objects])
         
-        # ── Step 3: Construção do System Prompt ───────────────────────────────
-        # O system prompt define o persona, regras de comportamento e injeta o contexto RAG
-        # As regras de formatação evitam LaTeX (não renderizável no Moodle/PHP)
-        system_prompt = (
-                            "Você é o Assistente Acadêmico do Manual de Avaliação. "
-                            "Use o contexto fornecido para responder às dúvidas dos alunos de forma detalhada e explicativa. "
-                            "\n\nREGRA CRÍTICA DE FORMATAÇÃO: "
-                            "1. NÃO use símbolos LaTeX como \\frac, \\text ou \\times. "
-                            "2. Escreva fórmulas matemáticas usando texto simples e legível (ex: (Lab * 6 + THC * 4) / 10). "
-                            "3. Use negrito para destacar termos importantes. "
-                            "4. Apresente passos de cálculo em listas numeradas. "
-                            f"\n\nContexto: {contexto}"  # Injeta os chunks recuperados do Weaviate
-                            )
-        
-        # ── Step 4: Geração de Resposta via GPT-4o ────────────────────────────
-        # Chama a API de chat completions da OpenAI com o contexto RAG no system prompt
-        completion = client_openai.chat.completions.create(
-            model="gpt-4o",  # Modelo principal — mais capaz para contexto médico e acadêmico
-            messages=[
-                {"role": "system", "content": system_prompt},  # Define persona, regras e contexto RAG
-                {"role": "user", "content": request.message}   # A pergunta real do aluno
-            ]
-        )
+        # ── Step 4: Geração de Resposta via NeMo Guardrails ────────────────────────────
+        # 1. Converte o histórico do formato Moodle (user/message) para o formato NeMo (role/content)
+        mensagens_nemo = []
+        for h in request.history:
+            msg = h.get("message", "").strip()
+            if not msg:
+                continue # Pula mensagens vazias
+            
+            role = "user"
+            # O Moodle envia o nome do usuário/assistente. 
+            if h.get('user') != request.user.get('fullname'):
+                role = "assistant"
+            mensagens_nemo.append({"role": role, "content": msg})
+
+        # 2. Prepara a pergunta atual
+        # Injetamos o contexto de forma clara
+        context_block = f"CONTEXTO DO MANUAL:\n{contexto}\n\n"
+        current_msg = f"{context_block}Pergunta: {request.message}"
+
+        # Adiciona a pergunta atual ao final do histórico
+        mensagens_nemo.append({"role": "user", "content": current_msg})
+
+        # Chama o NeMo Guardrails com o histórico COMPLETO
+        res_guardrails = await rails_app.generate_async(messages=mensagens_nemo)
         
         # ── Step 5: Retorno da Resposta JSON ──────────────────────────────────
+        # Extração Robusta (pode vir como objeto ou dict dependendo da situação do Rail)
+        answer_text = ""
+        if hasattr(res_guardrails, 'content'):
+            answer_text = res_guardrails.content
+        elif isinstance(res_guardrails, dict):
+            answer_text = res_guardrails.get('content', '')
+        else:
+            answer_text = str(res_guardrails)
+
         return {
-            "answer": completion.choices[0].message.content,  # Resposta gerada pelo GPT-4o
-            "id": f"fastapi_{usuario_id}"                      # Identificador único da interação
+            "answer": answer_text,
+            "id": f"fastapi_{usuario_id}"
         }
 
     except Exception as e:
