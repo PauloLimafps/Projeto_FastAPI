@@ -8,6 +8,7 @@ from dotenv import load_dotenv               # Carrega variáveis do arquivo .en
 from weaviate.classes.init import Auth       # Auth: autenticação por chave de API no Weaviate Cloud
 from contextlib import asynccontextmanager   # Para definir ciclo de vida assíncrono (startup/shutdown) da API
 from nemoguardrails import LLMRails, RailsConfig # Para a camada de segurança do LLM
+import cohere                                   # Para o Re-ranker de alta precisão
 
 # Carrega as variáveis do arquivo .env para o ambiente do processo Python
 load_dotenv()
@@ -18,6 +19,7 @@ load_dotenv()
 # Placeholder global — a conexão será criada no startup do FastAPI (dentro do lifespan)
 client_weaviate = None
 rails_app = None
+client_cohere = None
 
 # --- Gerenciador de Conexão (Resolve o ResourceWarning) ---
 # @asynccontextmanager transforma a função coroutine em um gerenciador de contexto assíncrono
@@ -35,12 +37,16 @@ async def lifespan(app: FastAPI):
         skip_init_checks=True # Pula o check de saúde que estava travando o startup
     )
     
-    # Inicializa o NeMo Guardrails
     global rails_app
     print("🛡️ Inicializando NeMo Guardrails...")
     rails_config = RailsConfig.from_path("./config")
     rails_app = LLMRails(rails_config)
     print("✅ NeMo Guardrails ativo!")
+
+    # Inicializa o Cohere (Re-ranker)
+    global client_cohere
+    client_cohere = cohere.ClientV2(os.getenv("COHERE_API_KEY"))
+    print("🎯 Re-ranker Cohere pronto!")
     
     yield  # A aplicação fica "viva" aqui, processando requisições HTTP normalmente
 
@@ -100,51 +106,77 @@ async def chat_endpoint(request: ChatRequest, token_payload: dict = Depends(vali
         usuario_id = str(token_payload.get("sub", "desconhecido"))
         
         # ── Step 0: Reformulação de Query (Standalone Question) ────────────────
-        # Se houver histórico, pedimos ao GPT para reescrever a pergunta de forma contextualizada
-        # Isso garante que "qual a fórmula?" se transforme em "qual a fórmula de HA vinculada ao THC?"
+        # Instrução reforçada: Obriga a IA a extrair Período e Matriz para a busca
         query_para_busca = request.message
         if request.history:
             try:
-                # Constrói um resumo rápido do histórico para o GPT contextualizar
-                resumo_conversa = "\n".join([f"{h.get('user', 'Usuário')}: {h.get('message', '')}" for h in request.history[-3:]]) # Últimas 3 interações
+                resumo_conversa = "\n".join([f"{h.get('user', 'Usuário')}: {h.get('message', '')}" for h in request.history[-3:]])
                 
                 reformulacao = client_openai.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "Você é um assistente técnico. Sua tarefa é reescrever a 'Pergunta Atual' do usuário em uma única frase de busca completa e independente, usando o 'Histórico da Conversa' para prover contexto. Retorne APENAS a frase reformulada, sem comentários."},
-                        {"role": "user", "content": f"Histórico:\n{resumo_conversa}\n\nPergunta Atual: {request.message}\n\nPergunta Reformulada:"}
+                        {"role": "system", "content": (
+                            "Você é um especialista em extração de contexto acadêmico. "
+                            "Sua tarefa é reescrever a 'Pergunta Atual' em uma busca completa para um banco de dados técnico. "
+                            "DIRETRIZ CRÍTICA: Se o 'Histórico' mencionar um Período (ex: 5º período) ou Matriz (ex: 2023.1), "
+                            "você deve OBRIGATORIAMENTE incluir esses termos na sua busca reformulada. "
+                            "Retorne APENAS a frase de busca, sem explicações."
+                        )},
+                        {"role": "user", "content": f"Histórico:\n{resumo_conversa}\n\nPergunta Atual: {request.message}"}
                     ],
                     max_tokens=60,
                     temperature=0
                 )
                 query_para_busca = reformulacao.choices[0].message.content.strip()
-                print(f"🔍 Query Reformulada: {query_para_busca}")
+                print(f"🔍 Query Contextualizada: {query_para_busca}")
             except Exception as re_err:
                 print(f"⚠️ Erro ao reformular query: {re_err}")
-                query_para_busca = request.message # Fallback para a original
+                query_para_busca = request.message
 
-        # ── Step 1: Busca Semântica no Weaviate ────────────────────────────────
-        # Recupera a referência à coleção "Documento" no Weaviate Cloud
+        # ── Step 1: Busca Híbrida no Weaviate ──────────────────────────────────
+        # Recupera a referência à coleção "Documento"
         colecao = client_weaviate.collections.get("Documento")
 
-        # Gera o embedding da pergunta REFORMULADA via OpenAI (RAG de Precisão)
+        # Gera o embedding da query reformulada (RAG de Precisão)
+        # Necessário para alimentar a parte vetorial da busca híbrida
         res_embedding = client_openai.embeddings.create(
             input=[query_para_busca],
             model="text-embedding-3-small"
         )
         vetor_query = res_embedding.data[0].embedding
 
-        # near_vector: busca os documentos cujos vetores são mais próximos ao vetor da query
-        # Não depende de vetorizador interno do Weaviate — usa o vetor gerado externamente
-        response = colecao.query.near_vector(
-            near_vector=vetor_query,  # Vetor semântico gerado pela OpenAI
-            limit=3                   # Retorna os 3 chunks com maior similaridade semântica
+        # Busca Híbrida: Combina Semântica (Vetor) + Lexical (Palavra-chave)
+        # alpha=0.5: equilibra 50% vetor e 50% keyword para siglas técnicas
+        res_weaviate = colecao.query.hybrid(
+            query=query_para_busca,   # Texto para busca por palavra-chave
+            vector=vetor_query,       # Vetor para busca semântica
+            limit=10,                 # Pegamos 10 candidatos para o re-ranker avaliar
+            alpha=0.5
         )
+
+        # ── Step 1.5: Re-ranking via Cohere API ───────────────────────────────
+        # O re-ranker analisa os 10 candidatos e escolhe os 3 melhores reais
+        candidatos = [obj.properties["conteudo"] for obj in res_weaviate.objects]
+        contexto_final = ""
+
+        if candidatos:
+            rerank_res = client_cohere.rerank(
+                model="rerank-multilingual-v3.0",
+                query=query_para_busca,
+                documents=candidatos,
+                top_n=3
+            )
+            
+            # Extrai os textos reordenados (Top 3)
+            trechos_selecionados = []
+            for result in rerank_res.results:
+                trechos_selecionados.append(candidatos[result.index])
+            
+            contexto_final = "\n\n".join(trechos_selecionados)
         
         # ── Step 2: Montagem do Contexto RAG ──────────────────────────────────
-        # Concatena o conteúdo textual dos chunks retornados, separados por linha dupla
         # Este contexto será injetado no system prompt para fundamentar a resposta do LLM
-        contexto = "\n\n".join([obj.properties["conteudo"] for obj in response.objects])
+        contexto = contexto_final
         
         # ── Step 4: Geração de Resposta via NeMo Guardrails ────────────────────────────
         # 1. Converte o histórico do formato Moodle (user/message) para o formato NeMo (role/content)
