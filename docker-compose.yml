@@ -41,8 +41,6 @@ services:
     build: .
     container_name: fastapi_rag
     restart: unless-stopped
-    ports:
-      - "8000:8000"
     env_file: .env
     depends_on:
       - kafka
@@ -52,3 +50,27 @@ services:
       - .:/app
     working_dir: /app
     command: uvicorn orquestrador:app --host 0.0.0.0 --port 8000 --reload
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.fastapi.rule=PathPrefix(`/chat`)"
+      - "traefik.http.routers.fastapi.entrypoints=web"
+      - "traefik.http.services.fastapi.loadbalancer.server.port=8000"
+      - "traefik.http.middlewares.fastapi-limit.ratelimit.average=15"
+      - "traefik.http.middlewares.fastapi-limit.ratelimit.period=1m"
+      - "traefik.http.middlewares.fastapi-limit.ratelimit.burst=5"
+      - "traefik.http.routers.fastapi.middlewares=fastapi-limit"
+
+  # SERVIÇO: API Gateway (Traefik) - Rate Limiting & Proxy
+  traefik:
+    image: traefik:v2.10
+    container_name: traefik_gateway
+    command:
+      - "--api.insecure=true" # Habilita o Dashboard na porta 8080
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:8000" # Traefik assume a porta 8000
+    ports:
+      - "8000:8000" # Porta de entrada única (o Moodle bate aqui)
+      - "8080:8080" # Dashboard visual
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
