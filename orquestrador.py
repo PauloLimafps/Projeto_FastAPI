@@ -1,6 +1,7 @@
 import os                        # Acesso às variáveis de ambiente (OPENAI_API_KEY)
 import weaviate                  # SDK do banco de dados vetorial Weaviate
-from fastapi import FastAPI, HTTPException   # FastAPI: framework web; HTTPException: erros HTTP padronizados
+from fastapi import FastAPI, HTTPException, Depends   # FastAPI: framework web; HTTPException: erros HTTP padronizados; Depends: injeção de dependência
+from auth import validate_jwt                     # Middleware de segurança JWT
 from pydantic import BaseModel, ConfigDict  # BaseModel: schema de request; ConfigDict: configuração Pydantic V2
 from openai import OpenAI                    # SDK da OpenAI para geração de respostas via GPT-4o
 from dotenv import load_dotenv               # Carrega variáveis do arquivo .env para o ambiente do processo
@@ -72,7 +73,7 @@ class ChatRequest(BaseModel):
 # ─── BLOCO 5: Endpoint Principal — POST /chat ─────────────────────────────────
 
 @app.post("/chat")
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(request: ChatRequest, token_payload: dict = Depends(validate_jwt)):
     """
     Endpoint principal da API RAG. Recebe uma pergunta do Moodle,
     executa busca semântica nos documentos institucionais (Weaviate),
@@ -81,9 +82,9 @@ async def chat_endpoint(request: ChatRequest):
     Fluxo: Pergunta → Busca Semântica → Contexto → System Prompt → GPT-4o → Resposta
     """
     try:
-        # Extrai o ID do usuário para compor o identificador da resposta
-        # Usa 'desconhecido' como fallback se o campo 'id' não estiver presente no dict
-        usuario_id = str(request.user.get('id', 'desconhecido'))
+        # Extrai o ID do usuário diretamente do payload do token validado para maior segurança
+        # Isso garante que o usuário logado é realmente quem diz ser no payload do JWT
+        usuario_id = str(token_payload.get("sub", "desconhecido"))
         
         # ── Step 1: Busca Semântica no Weaviate ────────────────────────────────
         # Recupera a referência à coleção "Documento" no Weaviate Cloud
@@ -113,7 +114,7 @@ async def chat_endpoint(request: ChatRequest):
         # O system prompt define o persona, regras de comportamento e injeta o contexto RAG
         # As regras de formatação evitam LaTeX (não renderizável no Moodle/PHP)
         system_prompt = (
-                            "Você é o Assistente Acadêmico do curso de Medicina. "
+                            "Você é o Assistente Acadêmico do Manual de Avaliação. "
                             "Use o contexto fornecido para responder às dúvidas dos alunos de forma detalhada e explicativa. "
                             "\n\nREGRA CRÍTICA DE FORMATAÇÃO: "
                             "1. NÃO use símbolos LaTeX como \\frac, \\text ou \\times. "
@@ -132,7 +133,7 @@ async def chat_endpoint(request: ChatRequest):
                 {"role": "user", "content": request.message}   # A pergunta real do aluno
             ]
         )
-
+        
         # ── Step 5: Retorno da Resposta JSON ──────────────────────────────────
         return {
             "answer": completion.choices[0].message.content,  # Resposta gerada pelo GPT-4o

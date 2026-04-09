@@ -35,3 +35,20 @@ services:
       STATUS_STORAGE_TOPIC: my_connect_statuses
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  # SERVIÇO: Orquestrador FastAPI (RAG)
+  fastapi:
+    build: .
+    container_name: fastapi_rag
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      - kafka
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Permite acesso ao SQL Server local
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: uvicorn orquestrador:app --host 0.0.0.0 --port 8000 --reload

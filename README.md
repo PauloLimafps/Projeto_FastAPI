@@ -2,130 +2,99 @@
 
 Bem-vindo ao repositório do **Orquestrador RAG (Retrieval-Augmented Generation)**. Este projeto estabelece uma arquitetura robusta e escalável para fornecer um assistente virtual inteligente alimentado por documentos institucionais, operando integrado a um plugin Moodle.
 
-A solução utiliza captura de dados por eventos (CDC) diretamente de um banco SQL Server, passando por uma mensageria Kafka, processamento e vetorização com OpenAI, e armazenamento no Weaviate. A interface principal é servida através de uma API FastAPI de alta performance.
+A solução utiliza captura de dados por eventos (CDC), mensageria Kafka, processamento semântico com OpenAI e armazenamento no Weaviate. A camada de aplicação é servida via **FastAPI** rodando em **containers Docker**.
 
 ---
 
 ## 🏗️ Arquitetura e Fluxo de Dados
 
-O projeto é dividido em processos assíncronos e síncronos:
+O projeto é dividido em fluxos de Ingestão e Consulta:
 
-1. **CDC (Change Data Capture)**: O **Debezium** monitora a tabela `arquivos_rag` no banco `CHAT_RAG` do SQL Server. Quando um novo documento é adicionado, um evento é gerado.
-2. **Mensageria**: O evento é propagado através do **Apache Kafka**.
-3. **Ingestão e Vetorização (`main.py`)**: Um consumer Python escuta o Kafka (tópico `ia_projeto.CHAT_RAG.dbo.arquivos_rag`), captura os metadados do documento (incluindo o caminho do arquivo), lê e "fatia" (chunking) o PDF usando `PyMuPDF`, gera *embeddings* usando a API da OpenAI e salva no banco de dados vetorial **Weaviate Cloud**.
-4. **Chatbot / Orquestrador (`orquestrador.py`)**: A aplicação Moodle faz chamadas para um endpoint **FastAPI**. O FastAPI faz a busca semântica no Weaviate e utiliza os documentos encontrados como contexto para o LLM da OpenAI gerar respostas precisas aos alunos.
+1.  **Ingestão (Back-office)**:
+    - **CDC**: O Debezium monitora o SQL Server.
+    - **Kafka**: Propaga os eventos de novos documentos.
+    - **Consumer (`main.py`)**: Processa PDFs, gera embeddings e alimenta o **Weaviate Cloud**.
+
+2.  **Consulta (Front-office - Seta 1)**:
+    - **Moodle**: Envia requisições assinadas via **JWT**.
+    - **FastAPI (`orquestrador.py`)**: Valida o token, consulta o Weaviate e gera a resposta via GPT-4o.
+
+---
+
+## 🔒 Segurança (Auth JWT)
+
+A comunicação entre Moodle e FastAPI é protegida por **JSON Web Tokens (HS256)**.
+- Todas as requisições devem conter o header `Authorization: Bearer <token>`.
+- O ID do usuário é extraído do payload do token validado (`sub`), impedindo a falsificação de identidade (User Spoofing).
+- A chave secreta (`JWT_SECRET`) deve ser idêntica em ambos os serviços.
 
 ---
 
 ## 📋 Pré-requisitos
 
-Antes de iniciar a implantação, certifique-se de ter os seguintes recursos instalados e configurados na sua máquina ou servidor:
-
-- **Docker e Docker Compose** (para serviços de infraestrutura: Kafka, Zookeeper e Debezium).
-- **Python 3.10+** (para rodar os serviços locais de ingestão e a API).
-- **SQL Server** rodando com CDC (Change Data Capture) habilitado.
-- Contas e chaves de acesso:
-  - `OPENAI_API_KEY` (Chave de API OpenAI ativa)
-  - `WCD_URL` e `WCD_API_KEY` (Credenciais do Weaviate Cloud).
+- **Docker e Docker Compose** (Obrigatório para a stack completa).
+- **Python 3.10+** (Apenas para rodar scripts locais de ingestão/setup).
+- **SQL Server** com CDC habilitado.
+- Contas: OpenAI API e Weaviate Cloud.
 
 ---
 
 ## 🛠️ Passo a Passo de Implantação
 
-Siga os passos abaixo, na ordem descrita, para montar o ambiente por completo.
-
 ### 1. Preparação da Infraestrutura Docker
-
-O arquivo `docker-compose.yml` provê a stack base de mensageria.
+O arquivo `docker-compose.yml` agora gerencia toda a stack, incluindo o Orquestrador.
 
 ```bash
-# Inicie todos os containers em segundo plano
-docker-compose up -d
+# Inicie todos os serviços: Zookeeper, Kafka, Debezium e FastAPI
+docker-compose up -d --build
 ```
-> **Nota:** Isso irá iniciar o Kafka (`9092`), Zookeeper (`2181`) e Debezium (`8083`). O Weaviate é acessado via Cloud.
+> **Serviços Ativos**:
+> - **Kafka**: `9092`
+> - **Debezium**: `8083`
+> - **FastAPI (Orquestrador)**: `8000`
 
-### 2. Configuração do Ambiente Python
+### 2. Configuração do Ambiente (.env)
+Crie o arquivo `.env` na raiz com as seguintes chaves mínimas:
+```env
+OPENAI_API_KEY=sk-...
+JWT_SECRET=sua_chave_secreta_gerada
+WCD_URL=...
+WCD_API_KEY=...
+SQLSERVER_HOST=host.docker.internal
+```
 
-Recomenda-se criar um ambiente virtual isolado para evitar conflitos de versão:
-
+### 3. Registro do Conector (SQL -> Kafka)
+Instale as dependências locais no seu `.venv` e registre o conector:
 ```bash
-# Criar ambiente virtual
-python -m venv .venv
-
-# Ativar ambiente (Windows)
-.venv\Scripts\activate
-# Ativar ambiente (Linux/Mac)
-# source .venv/bin/activate
-
-# Instalar as bibliotecas necessárias
 pip install -r requirements.txt
-```
-
-Crie o seu arquivo `.env` na raiz do projeto contendo as chaves necessárias (e.g.: `OPENAI_API_KEY=sk-...`).
-
-### 3. Registro do Conector Debezium (SQL Server -> Kafka)
-
-Esse script instrui o Debezium a escutar seu banco de dados.
-
-```bash
 python register_connector.py
 ```
-*Se houver sucesso, você verá "✅ Conector registrado!". O serviço começará a observar o banco `CHAT_RAG` via Kafka.*
 
-### 4. Setup do Banco Vetorial (Weaviate)
-
-Antes de gravar qualquer dado, você precisa garantir que as coleções existem no Weaviate:
-
-```bash
-python setup_weaviate.py
-```
-*Espera-se a mensagem "✅ Coleção 'Documento' criada com sucesso no Weaviate (v4)!".*
-
-### 5. Iniciar o Consumer de Ingestão de PDF
-
-Esta é a rotina em back-ground responsável por escutar o Kafka e processar os PDFs inseridos no SQL. Deixe rodando num terminal reservado.
-
-```bash
-python main.py
-```
-*O sistema informará 🚀 Orquestrador de Documentos ATIVO! e iniciará o "handshake" processando os PDFs da fila para o banco logico do Weaviate.*
-
-### 6. Subir a API do Assistente (FastAPI)
-
-Este é o endpoint `/chat` que o Moodle vai consumir. Em outro terminal (com o `.venv` ativado):
-
-```bash
-python orquestrador.py
-```
-*O serviço iniciará via Uvicorn na porta `8000`. Teste o acesso local abrindo `http://localhost:8000/docs` no navegador.*
+### 4. Setup e Ingestão
+Com a infraestrutura (Kafka/Weaviate) pronta, inicie a ingestão de documentos:
+1. Garanta as coleções no Weaviate: `python setup_weaviate.py`
+2. Inicie o processador de PDFs: `python main.py`
 
 ---
 
 ## 📂 Visão Geral dos Arquivos
 
-- **`docker-compose.yml`**: Configuração central do Docker com Kafka, Zookeeper e Debezium.
-- **`register_connector.py`**: Interage com a REST API do Debezium (`http://localhost:8083`) para criar o conector apontando para o banco `CHAT_RAG`.
-- **`setup_weaviate.py`**: Cria a coleção `Documento` no Weaviate Cloud com as propriedades `titulo`, `conteudo`, `original_id` e `fonte`.
-- **`main.py`**: Consumer Kafka que processa mensagens do banco, extrai texto do PDF, gera embeddings e alimenta o Weaviate.
-- **`orquestrador.py`**: API FastAPI que recebe perguntas, faz busca semântica no Weaviate e gera respostas via GPT-4o.
-- **`requirements.txt`**: Bibliotecas necessárias (`weaviate-client`, `confluent-kafka`, `openai`, `fastapi`, `pymupdf`).
+- **`docker-compose.yml`**: Orquestração de containers (Kafka, Debezium, FastAPI).
+- **`Dockerfile`**: Definição da imagem do Orquestrador FastAPI.
+- **`auth.py`**: Lógica de validação de tokens JWT (HS256).
+- **`orquestrador.py`**: API principal protegida por autenticação.
+- **`main.py`**: Consumer de ingestão (Vetorização de PDFs).
+- **`requirements.txt`**: Dependências Python (agora inclui `fastapi`, `uvicorn` e `python-jose`).
 
 ---
 
 ## 🔗 Integração no Moodle
 
-Com o serviço do **FastAPI (`orquestrador.py`)** rodando na sua porta de acesso externo (`8000`), aponte o seu bloco Moodle para enviar requisições POST para `http://<SEU-IP>:8000/chat`.
+Aponte o plugin Moodle para o endpoint `/chat` do container:
+**URL**: `http://<IP_DO_SERVIDOR>:8000/chat`
+**Método**: POST (Assinado com HS256)
 
-**Exemplo de Payload JSON:**
-```json
-{
-  "message": "Como funciona o sistema de avaliação?",
-  "user": {"id": 123, "name": "João Silva"},
-  "page_context": {"course": "Medicina"},
-  "student_enrollments": ["Medicina 2024"]
-}
-```
-A API retornará um JSON com a chave `answer` contendo a resposta fundamentada nos documentos.
+O payload enviado deve seguir a estrutura rica de contexto (ID do usuário, Curso, Matrículas), mas a identificação final para logs e RAG será validada via JWT.
 
 ---
-*💡 Este documento fornece uma visão panorâmica e os comandos chave do ciclo de vida da aplicação.*
+*💡 Este projeto foi atualizado para seguir padrões profissionais de segurança e containers.*
