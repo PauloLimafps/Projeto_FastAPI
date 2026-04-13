@@ -1,5 +1,4 @@
 import os           # Acesso a variáveis de ambiente e ao sistema de arquivos
-# Deserialização das mensagens Kafka (formato JSON/Debezium CDC)
 import json
 import sys          # Usado para eventual encerramento forçado do processo
 import weaviate     # SDK do banco de dados vetorial Weaviate
