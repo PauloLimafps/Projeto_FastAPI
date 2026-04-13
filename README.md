@@ -29,7 +29,6 @@ Camada de inteligência que serve às requisições do front-end:
 ---
 
 ## 🔒 Camada de Segurança
-
 A proteção dos dados e dos endpoints é garantida através de protocolos modernos:
 - **Autenticação JWT (HS256)**: Toda comunicação entre serviços exige assinatura digital, eliminando o risco de acessos não autorizados.
 - **Identidade Protegida**: Extração segura de metadados (`sub`), assegurando a integridade da identidade do usuário.
@@ -38,7 +37,6 @@ A proteção dos dados e dos endpoints é garantida através de protocolos moder
 ---
 
 ## 📋 Requisitos para Operação
-
 - **Infraestrutura**: Docker e Docker Compose instalados.
 - **Dados**: SQL Server com recurso de CDC habilitado.
 - **Conectividade**: Acesso às APIs da OpenAI e instância no Weaviate Cloud.
@@ -63,10 +61,15 @@ docker-compose up -d --build
 ---
 
 ## 📂 Componentes do Sistema (Containers)
-
 - **`traefik_gateway`**: Ponto único de entrada e controle.
 - **`fastapi_rag`**: Núcleo da API e lógica orquestradora.
 - **`pdf_engine_rag`**: Processamento de background para documentos.
 - **`kafka/zookeeper` & `debezium`**: Infraestrutura de dados e eventos.
+
+---
+
+## 🧩 Módulo de Interface (Plugin Moodle)
+Para a completa operação deste ecossistema, o Moodle deve possuir o plugin conector instalado e configurado:
+- **Repositório do Plugin**: [LMS Plugin (Moodle)](https://github.com/PauloLimafps/plugin_LMS)
 
 ---
