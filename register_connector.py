@@ -4,7 +4,7 @@ import os         # Acesso a variáveis de ambiente (importado mas não utilizad
 from dotenv import load_dotenv  # Carrega variáveis definidas no arquivo .env para o ambiente do processo
 
 # Carrega as variáveis de ambiente do arquivo .env
-# (as credenciais do SQL Server estão no .env, mas o código usa valores hardcoded no connector_config)
+# (as credenciais do SQL Server são lidas com os.getenv e injetadas no connector_config)
 load_dotenv()
 
 # URL base da API REST do Kafka Connect onde o Debezium é gerenciado

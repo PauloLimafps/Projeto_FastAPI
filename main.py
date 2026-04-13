@@ -14,6 +14,19 @@ from dotenv import load_dotenv
 from weaviate.classes.init import Auth, Timeout
 # Divide textos longos em chunks menores
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+import logging
+from pythonjsonlogger import jsonlogger
+
+# ─── Configuração de Telemetria (Logs JSON) ───────────────────────────────────
+logger = logging.getLogger("pdf_engine")
+logger.setLevel(logging.INFO)
+logHandler = logging.StreamHandler()
+formatter = jsonlogger.JsonFormatter(
+    fmt="%(asctime)s %(levelname)s %(name)s %(message)s"
+)
+logHandler.setFormatter(formatter)
+logger.addHandler(logHandler)
+
 
 # ─── BLOCO 1: Inicialização do Ambiente ────────────────────────────────────────
 
@@ -55,7 +68,7 @@ def processar_pdf_em_pedacos(caminho_pdf, titulo_base, doc_id, colecao):
         bool: True se o processamento foi concluído com sucesso, False caso contrário.
     """
     try:
-        print(f"📖 Abrindo arquivo: {caminho_pdf}")
+        logger.info("Abrindo arquivo PDF para leitura", extra={"caminho_pdf": caminho_pdf})
 
         # Abre o arquivo PDF usando PyMuPDF (fitz)
         doc = fitz.open(caminho_pdf)
@@ -67,8 +80,7 @@ def processar_pdf_em_pedacos(caminho_pdf, titulo_base, doc_id, colecao):
 
         # Divide o texto total em pedaços menores (chunks) usando o fatiador configurado
         pedacos = text_splitter.split_text(texto_completo)
-        print(
-            f"✂️ PDF fatiado em {len(pedacos)} pedaços. Iniciando vetorização...")
+        logger.info("PDF fatiado com sucesso.", extra={"pedacos_total": len(pedacos), "caminho_pdf": caminho_pdf})
 
         # Itera por cada chunk para gerar embedding e persistir individualmente no Weaviate
         for i, conteudo_pedaco in enumerate(pedacos):
@@ -98,7 +110,7 @@ def processar_pdf_em_pedacos(caminho_pdf, titulo_base, doc_id, colecao):
 
     except Exception as e:
         # Captura qualquer erro (falha ao abrir PDF, erro na API OpenAI, erro no insert Weaviate)
-        print(f"❌ Erro ao processar PDF {caminho_pdf}: {e}")
+        logger.error("Erro ao processar PDF", extra={"erro": str(e), "caminho_pdf": caminho_pdf})
         return False  # Indica falha — o chamador pode logar ou tentar novamente
 
 
@@ -133,21 +145,21 @@ def wait_for_kafka(host_port, timeout=60):
     host, port = host_port.split(':')
     port = int(port)
     start_time = time.time()
-    print(f"⏳ Aguardando Kafka em {host_port}...")
+    logger.info("Aguardando Kafka", extra={"host_port": host_port})
     while True:
         try:
             with socket.create_connection((host, port), timeout=1):
-                print("✅ Kafka detectado e pronto!")
+                logger.info("Kafka detectado e pronto!")
                 return True
         except (socket.timeout, ConnectionRefusedError):
             if time.time() - start_time > timeout:
-                print("❌ Timeout: Kafka não respondeu a tempo.")
+                logger.error("Timeout: Kafka nao respondeu a tempo.", extra={"host_port": host_port})
                 return False
             time.sleep(2)
 
 # Aguarda o Kafka antes de continuar a inicialização
 if not wait_for_kafka(KAFKA_SERVER):
-    print("CRÍTICO: Não foi possível conectar ao Kafka. Encerrando...")
+    logger.critical("Critico: Não foi possível conectar ao Kafka. Encerrando...")
     sys.exit(1)
 
 # Dicionário de configuração do consumidor Kafka
@@ -165,14 +177,14 @@ consumer = Consumer(conf)
 # Padrão do nome do tópico: {topic.prefix}.{database}.{schema}.{table}
 consumer.subscribe(['ia_projeto.CHAT_RAG.dbo.arquivos_rag'])
 
-print("\n🚀 Orquestrador de Documentos ATIVO! Aguardando Paths do SQL Server...\n")
+logger.info("Orquestrador de Documentos ATIVO! Aguardando Paths do SQL Server...")
 
 # ─── BLOCO 6: Loop Principal de Consumo e Processamento ──────────────────────
 
 try:
     # Obtém a referência à coleção "Documento" já existente no Weaviate Cloud
     colecao_documentos = client_weaviate.collections.get("Documento")
-    print("\nEntrando no try\n")
+    logger.info("Iniciando loop de consumo do Debezium...")
 
     # Loop infinito: fica aguardando e processando novas mensagens do Kafka indefinidamente
     while True:
@@ -187,7 +199,7 @@ try:
         # 2. Verifica erros do Kafka
         # Pode ocorrer em rebalanceamento de partições, desconexão ou outros problemas de broker
         if msg.error():
-            print(f"Erro Kafka: {msg.error()}")
+            logger.error("Erro Kafka encontrado", extra={"erro_detalhe": str(msg.error())})
             continue
 
         # 3. TRAVA ESSENCIAL: Verifica se o valor é nulo (evita o erro do decode)
@@ -218,7 +230,7 @@ try:
                 # Exemplo: 'C:\Users\...\teste.pdf' -> 'teste.pdf'
                 partes = path_pdf.split('\\')
                 filename_alvo = partes[-1].strip().lower()
-                print(f"🔍 Procurando arquivo: '{filename_alvo}'")
+                logger.info("Procurando arquivo via mapped-path", extra={"filename_alvo": filename_alvo, "original_path": path_pdf})
                 
                 # Lista de pastas onde vamos procurar o arquivo
                 pastas_busca = ["/app", "/app/data"]
@@ -231,27 +243,25 @@ try:
                             if f.strip().lower() == filename_alvo:
                                 final_path = os.path.join(pasta, f)
                                 encontrou = True
-                                print(f"✅ Encontrado em: {final_path}")
+                                logger.info("Arquivo encontrado no container", extra={"final_path": final_path})
                                 break
                     if encontrou: break
 
             # Verifica se o arquivo final realmente existe
             if final_path and os.path.exists(final_path):
-                print(f"📂 Arquivo localizado em: {final_path}")
+                logger.info("Iniciando fatiamento e embedding do arquivo", extra={"final_path": final_path, "titulo": titulo})
                 # Chama a função principal de processamento PDF → Embedding → Weaviate
                 sucesso = processar_pdf_em_pedacos(
                     final_path, titulo, doc_id, colecao_documentos)
                 if sucesso:
-                    print(
-                        f"✨ SUCESSO TOTAL: Documento '{titulo}' agora está no Weaviate!")
+                    logger.info("SUCESSO TOTAL: Documento vetorizado e disponivel no Weaviate", extra={"titulo": titulo, "doc_id": doc_id})
             else:
                 # Arquivo não encontrado
-                print(f"❌ ERRO: O arquivo '{path_pdf}' não foi encontrado no container.")
-                print(f"   (Dica: Verifique se o nome no SQL coincide exatamente com o arquivo na pasta do projeto)")
+                logger.error("Arquivo PDF não foi encontrado no container. Verifique nomes e pastas mapeadas no docker-compose.", extra={"path_buscado": path_pdf})
 
 except KeyboardInterrupt:
     # Usuário pressionou Ctrl+C — encerramento gracioso e esperado
-    print("\n🛑 Encerrando...")
+    logger.info("Encerrando motor PDF (processo pausado)...")
 finally:
     # Bloco finally garante liberação de recursos independentemente de como o loop terminou
     # Fecha a conexão com o Kafka (comita offsets pendentes e libera o grupo)

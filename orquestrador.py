@@ -9,9 +9,24 @@ from weaviate.classes.init import Auth       # Auth: autenticação por chave de
 from contextlib import asynccontextmanager   # Para definir ciclo de vida assíncrono (startup/shutdown) da API
 from nemoguardrails import LLMRails, RailsConfig # Para a camada de segurança do LLM
 import cohere                                   # Para o Re-ranker de alta precisão
+import logging
+from pythonjsonlogger import jsonlogger
+import time
+from fastapi import Request
 
 # Carrega as variáveis do arquivo .env para o ambiente do processo Python
 load_dotenv()
+
+# ─── Configuração de Telemetria (Logs JSON) ───────────────────────────────────
+logger = logging.getLogger("orquestrador")
+logger.setLevel(logging.INFO)
+logHandler = logging.StreamHandler()
+formatter = jsonlogger.JsonFormatter(
+    fmt="%(asctime)s %(levelname)s %(name)s %(message)s"
+)
+logHandler.setFormatter(formatter)
+logger.addHandler(logHandler)
+
 
 
 # ─── BLOCO 1: Ciclo de Vida da Aplicação (Lifespan) ──────────────────────────
@@ -38,15 +53,15 @@ async def lifespan(app: FastAPI):
     )
     
     global rails_app
-    print("🛡️ Inicializando NeMo Guardrails...")
+    logger.info("Inicializando NeMo Guardrails...")
     rails_config = RailsConfig.from_path("./config")
     rails_app = LLMRails(rails_config)
-    print("✅ NeMo Guardrails ativo!")
+    logger.info("NeMo Guardrails ativo!")
 
     # Inicializa o Cohere (Re-ranker)
     global client_cohere
     client_cohere = cohere.ClientV2(os.getenv("COHERE_API_KEY"))
-    print("🎯 Re-ranker Cohere pronto!")
+    logger.info("Re-ranker Cohere pronto!")
     
     yield  # A aplicação fica "viva" aqui, processando requisições HTTP normalmente
 
@@ -54,14 +69,34 @@ async def lifespan(app: FastAPI):
     # O que acontece quando o app desliga
     if client_weaviate.is_connected():
         client_weaviate.close()  # Fecha a conexão TCP com o Weaviate para evitar ResourceWarning
-        print("🔌 Conexão Weaviate fechada com segurança.")
+        logger.info("Conexão Weaviate fechada com segurança.")
 
 # ─── BLOCO 2: Instâncias Globais da Aplicação ─────────────────────────────────
 
 # Cria a instância da aplicação FastAPI com título descritivo e gerenciador de ciclo de vida
 app = FastAPI(title="Orquestrador RAG - CorporativoIA", lifespan=lifespan)
 
-# Cria o cliente da OpenAI — será verwendet para gerar embeddings
+# --- Timing Middleware (Telemetria de Tempo de Resposta) ---
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    duracao_ms = round(process_time * 1000, 2)
+    
+    # Log padrão de acesso JSON
+    logger.info(
+        "Acesso API", 
+        extra={
+            "metodo": request.method,
+            "endpoint": request.url.path,
+            "status_code": response.status_code,
+            "duracao_ms": duracao_ms
+        }
+    )
+    return response
+
+# Cria o cliente da OpenAI — será utilizado para gerar embeddings
 client_openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
@@ -128,9 +163,9 @@ async def chat_endpoint(request: ChatRequest, token_payload: dict = Depends(vali
                     temperature=0
                 )
                 query_para_busca = reformulacao.choices[0].message.content.strip()
-                print(f"🔍 Query Contextualizada: {query_para_busca}")
+                logger.info("Query contextualizada extraida do LLM", extra={"query_buscada": query_para_busca})
             except Exception as re_err:
-                print(f"⚠️ Erro ao reformular query: {re_err}")
+                logger.warning("Falha ao reformular query. Usando original.", extra={"erro": str(re_err)})
                 query_para_busca = request.message
 
         # ── Step 1: Busca Híbrida no Weaviate ──────────────────────────────────
@@ -220,7 +255,7 @@ async def chat_endpoint(request: ChatRequest, token_payload: dict = Depends(vali
 
     except Exception as e:
         # Loga o erro internamente e retorna HTTP 500 com detalhes para facilitar o debug
-        print(f"❌ Erro: {e}")
+        logger.error("Erro interno no endpoint de chat", extra={"erro": str(e), "usuario_id": usuario_id if 'usuario_id' in locals() else "N/A"})
         raise HTTPException(status_code=500, detail=str(e))
 
 # ─── BLOCO 6: Ponto de Entrada para Execução Direta ──────────────────────────

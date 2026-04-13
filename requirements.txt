@@ -1,3 +1,7 @@
+# Requisitos do Orquestrador RAG
+# Python Recomendado: 3.10 ou superior (O Dockerfile utiliza python:3.10-slim)
+
+# Banco de Dados Vetorial Weaviate (v4)
 weaviate-client>=4.0.0
 confluent-kafka
 openai
@@ -10,3 +14,6 @@ uvicorn
 python-jose[cryptography]
 nemoguardrails
 cohere
+
+# Telemetria e Logs Estruturados
+python-json-logger
