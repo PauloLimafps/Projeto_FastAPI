@@ -1,100 +1,73 @@
-# 🚀 Projeto RAG CorporativoIA - Moodle & FastAPI
+# 🚀 Orquestrador RAG - Ecossistema Moodle & FastAPI
 
-Bem-vindo ao repositório do **Orquestrador RAG (Retrieval-Augmented Generation)**. Este projeto estabelece uma arquitetura robusta e escalável para fornecer um assistente virtual inteligente alimentado por documentos institucionais, operando integrado a um plugin Moodle.
+Esta plataforma estabelece uma arquitetura robusta para a implementação de assistentes virtuais inteligentes baseados em documentos institucionais. A solução integra um fluxo de Ingestão de Dados via CDC (Change Data Capture) com uma API de consulta de alto desempenho, operando de forma transparente com o Moodle.
 
-A solução utiliza captura de dados por eventos (CDC), mensageria Kafka, processamento semântico com OpenAI e armazenamento no Weaviate. A camada de aplicação é servida via **FastAPI** rodando em **containers Docker**.
+A estrutura foi desenvolvida para garantir escalabilidade e segurança, utilizando tecnologias como Kafka para mensageria, Weaviate para armazenamento vetorial e Docker para orquestração de serviços.
 
 ---
 
 ## 🏗️ Arquitetura e Fluxo de Dados
 
-O projeto é dividido em fluxos de Ingestão e Consulta:
+O ecossistema é dividido em dois pilares fundamentais:
 
-1.  **Ingestão (Back-office)**:
-    - **CDC**: O Debezium monitora o SQL Server.
-    - **Kafka**: Propaga os eventos de novos documentos.
-    - **Consumer (`main.py`)**: Processa PDFs, gera embeddings e alimenta o **Weaviate Cloud**.
+### 1. Fluxo de Ingestão (Data Pipeline)
+Responsável por transformar informação bruta em conhecimento semântico:
+- **Camada de Dados**: Monitoramento direto do banco SQL Server através de CDC.
+- **Captura e Mensageria**: Utilização de Debezium e Kafka para a propagação de eventos de novos documentos em tempo real.
+- **Motor de Ingestão (`pdf_engine_rag`)**: 
+  - Serviço autônomo encarregado do processamento de PDFs e geração de embeddings.
+  - **Diferencial de Resiliência**: Implementação de lógica para compatibilidade de caminhos entre sistemas Windows e Linux, garantindo o acesso aos arquivos físicos independente do formato da referência capturada no banco de dados.
 
-2.  **Consulta (Front-office - Seta 1)**:
-    - **Moodle**: Envia requisições assinadas via **JWT**.
-    - **FastAPI (`orquestrador.py`)**: Valida o token, consulta o Weaviate e gera a resposta via GPT-4o.
-
----
-
-## 🔒 Segurança (Auth JWT)
-
-A comunicação entre Moodle e FastAPI é protegida por **JSON Web Tokens (HS256)**.
-- Todas as requisições devem conter o header `Authorization: Bearer <token>`.
-- O ID do usuário é extraído do payload do token validado (`sub`), impedindo a falsificação de identidade (User Spoofing).
-- A chave secreta (`JWT_SECRET`) deve ser idêntica em ambos os serviços.
+### 2. Fluxo de Consulta (API Orchestrator)
+Camada de inteligência que serve às requisições do front-end:
+- **Gateway (Traefik)**: Gerenciamento inteligente de tráfego com aplicação de *Rate Limiting* e proxy reverso.
+- **Orquestrador (`fastapi_rag`)**: 
+  - Validação de tokens JWT para segurança da API.
+  - Execução de buscas híbridas no Weaviate Cloud.
+  - Geração de respostas contextualizadas com suporte ao modelo GPT-4o.
 
 ---
 
-## 📋 Pré-requisitos
+## 🔒 Camada de Segurança
 
-- **Docker e Docker Compose** (Obrigatório para a stack completa).
-- **Python 3.10+** (Apenas para rodar scripts locais de ingestão/setup).
-- **SQL Server** com CDC habilitado.
-- Contas: OpenAI API e Weaviate Cloud.
+A proteção dos dados e dos endpoints é garantida através de protocolos modernos:
+- **Autenticação JWT (HS256)**: Toda comunicação entre serviços exige assinatura digital, eliminando o risco de acessos não autorizados.
+- **Identidade Protegida**: Extração segura de metadados (`sub`), assegurando a integridade da identidade do usuário.
+- **Controle de Tráfego**: Proteção nativa no Gateway para mitigar abusos e garantir a estabilidade do orquestrador.
 
 ---
 
-## 🛠️ Passo a Passo de Implantação
+## 📋 Requisitos para Operação
 
-### 1. Preparação da Infraestrutura Docker
-O arquivo `docker-compose.yml` agora gerencia toda a stack, incluindo o Orquestrador.
+- **Infraestrutura**: Docker e Docker Compose instalados.
+- **Dados**: SQL Server com recurso de CDC habilitado.
+- **Conectividade**: Acesso às APIs da OpenAI e instância no Weaviate Cloud.
 
+---
+
+## 🛠️ Procedimentos de Implantação
+
+### 1. Variáveis de Ambiente
+Configuração do arquivo `.env` com as credenciais de banco, URLs de cluster e chaves de API necessárias para a integração.
+
+### 2. Inicialização da Stack
 ```bash
-# Inicie todos os serviços: Zookeeper, Kafka, Debezium e FastAPI
+# Ativação de todos os serviços (Kafka, Debezium, FastAPI, PDF Engine, Traefik)
 docker-compose up -d --build
 ```
-> **Serviços Ativos**:
-> - **Kafka**: `9092`
-> - **Debezium**: `8083`
-> - **FastAPI (Orquestrador)**: `8000`
 
-### 2. Configuração do Ambiente (.env)
-Crie o arquivo `.env` na raiz com as seguintes chaves mínimas:
-```env
-OPENAI_API_KEY=sk-...
-JWT_SECRET=sua_chave_secreta_gerada
-WCD_URL=...
-WCD_API_KEY=...
-SQLSERVER_HOST=host.docker.internal
-```
-
-### 3. Registro do Conector (SQL -> Kafka)
-Instale as dependências locais no seu `.venv` e registre o conector:
-```bash
-pip install -r requirements.txt
-python register_connector.py
-```
-
-### 4. Setup e Ingestão
-Com a infraestrutura (Kafka/Weaviate) pronta, inicie a ingestão de documentos:
-1. Garanta as coleções no Weaviate: `python setup_weaviate.py`
-2. Inicie o processador de PDFs: `python main.py`
+### 3. Registro e Setup
+- Registro do conector SQL via script `register_connector.py`.
+- Preparação de coleções no Weaviate através do `setup_weaviate.py`.
 
 ---
 
-## 📂 Visão Geral dos Arquivos
+## 📂 Componentes do Sistema (Containers)
 
-- **`docker-compose.yml`**: Orquestração de containers (Kafka, Debezium, FastAPI).
-- **`Dockerfile`**: Definição da imagem do Orquestrador FastAPI.
-- **`auth.py`**: Lógica de validação de tokens JWT (HS256).
-- **`orquestrador.py`**: API principal protegida por autenticação.
-- **`main.py`**: Consumer de ingestão (Vetorização de PDFs).
-- **`requirements.txt`**: Dependências Python (agora inclui `fastapi`, `uvicorn` e `python-jose`).
+- **`traefik_gateway`**: Ponto único de entrada e controle.
+- **`fastapi_rag`**: Núcleo da API e lógica orquestradora.
+- **`pdf_engine_rag`**: Processamento de background para documentos.
+- **`kafka/zookeeper` & `debezium`**: Infraestrutura de dados e eventos.
 
 ---
-
-## 🔗 Integração no Moodle
-
-Aponte o plugin Moodle para o endpoint `/chat` do container:
-**URL**: `http://<IP_DO_SERVIDOR>:8000/chat`
-**Método**: POST (Assinado com HS256)
-
-O payload enviado deve seguir a estrutura rica de contexto (ID do usuário, Curso, Matrículas), mas a identificação final para logs e RAG será validada via JWT.
-
----
-*💡 Este projeto foi atualizado para seguir padrões profissionais de segurança e containers.*
+*💡 Arquitetura focada na entrega de suporte inteligente e contextualizado para ambientes educacionais.*
