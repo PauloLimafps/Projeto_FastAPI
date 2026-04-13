@@ -2,18 +2,28 @@
 # Python Recomendado: 3.10 ou superior (O Dockerfile utiliza python:3.10-slim)
 
 # Banco de Dados Vetorial Weaviate (v4)
-weaviate-client>=4.0.0
-confluent-kafka
-openai
-python-dotenv
-requests
-pymupdf
-langchain-text-splitters
-fastapi
-uvicorn
-python-jose[cryptography]
-nemoguardrails
-cohere
+weaviate-client==4.20.4
 
-# Telemetria e Logs Estruturados
-python-json-logger
+# Mensageria / Kafka
+confluent-kafka==2.14.0
+
+# IA, Embeddings e Re-ranking
+openai==2.30.0
+cohere==6.1.0
+
+# Processamento de PDFs e Texto
+pymupdf==1.27.2.2
+langchain-text-splitters==1.1.1
+
+# Framework Web e Servidor ASGI
+fastapi==0.135.3
+uvicorn==0.44.0
+
+# Segurança e Utilities
+python-jose[cryptography]==3.5.0
+python-dotenv==1.2.2
+requests==2.33.1
+
+# Guardrails e Telemetria
+nemoguardrails==0.21.0
+python-json-logger==4.1.0
