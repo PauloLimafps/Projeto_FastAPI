@@ -122,10 +122,39 @@ client_weaviate = weaviate.connect_to_weaviate_cloud(
 # ─── BLOCO 5: Configuração do Consumidor Kafka ────────────────────────────────
 
 # 3. Configuração Kafka
+# Endereço do broker Kafka (usa 'kafka:29092' no Docker e 'localhost:9092' localmente)
+KAFKA_SERVER = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+
+import socket
+import time
+
+def wait_for_kafka(host_port, timeout=60):
+    """Aguarda até que o broker Kafka esteja aceitando conexões no socket."""
+    host, port = host_port.split(':')
+    port = int(port)
+    start_time = time.time()
+    print(f"⏳ Aguardando Kafka em {host_port}...")
+    while True:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                print("✅ Kafka detectado e pronto!")
+                return True
+        except (socket.timeout, ConnectionRefusedError):
+            if time.time() - start_time > timeout:
+                print("❌ Timeout: Kafka não respondeu a tempo.")
+                return False
+            time.sleep(2)
+
+# Aguarda o Kafka antes de continuar a inicialização
+if not wait_for_kafka(KAFKA_SERVER):
+    print("CRÍTICO: Não foi possível conectar ao Kafka. Encerrando...")
+    sys.exit(1)
+
 # Dicionário de configuração do consumidor Kafka
-conf = {'bootstrap.servers': 'localhost:9092',  # Endereço do broker Kafka rodando localmente via Docker
+conf = {'bootstrap.servers': KAFKA_SERVER,
         # ID do grupo de consumidores (controla onde o offset é salvo)
-        'group.id': 'v40-pdf-engine',
+        # Bumping para v45 - fix na extração de caminhos Windows
+        'group.id': 'v45-pdf-engine',
         # Se não há offset salvo, lê desde o início do tópico
         'auto.offset.reset': 'earliest'}
 
@@ -182,19 +211,43 @@ try:
             # Chave primária do registro no SQL Server
             doc_id = payload_after.get('id')
 
-            # Verifica se o caminho foi fornecido E se o arquivo realmente existe no sistema de arquivos
-            if path_pdf and os.path.exists(path_pdf):
+            # --- Lógica de Mapeamento de Caminho Robusta ---
+            final_path = path_pdf
+            if not os.path.exists(final_path):
+                # Extrai o nome do arquivo de caminho Windows (usa \ como separador)
+                # Exemplo: 'C:\Users\...\teste.pdf' -> 'teste.pdf'
+                partes = path_pdf.split('\\')
+                filename_alvo = partes[-1].strip().lower()
+                print(f"🔍 Procurando arquivo: '{filename_alvo}'")
+                
+                # Lista de pastas onde vamos procurar o arquivo
+                pastas_busca = ["/app", "/app/data"]
+                encontrou = False
+                
+                for pasta in pastas_busca:
+                    if os.path.exists(pasta):
+                        arquivos_na_pasta = os.listdir(pasta)
+                        for f in arquivos_na_pasta:
+                            if f.strip().lower() == filename_alvo:
+                                final_path = os.path.join(pasta, f)
+                                encontrou = True
+                                print(f"✅ Encontrado em: {final_path}")
+                                break
+                    if encontrou: break
+
+            # Verifica se o arquivo final realmente existe
+            if final_path and os.path.exists(final_path):
+                print(f"📂 Arquivo localizado em: {final_path}")
                 # Chama a função principal de processamento PDF → Embedding → Weaviate
                 sucesso = processar_pdf_em_pedacos(
-                    path_pdf, titulo, doc_id, colecao_documentos)
+                    final_path, titulo, doc_id, colecao_documentos)
                 if sucesso:
                     print(
                         f"✨ SUCESSO TOTAL: Documento '{titulo}' agora está no Weaviate!")
             else:
-                # Arquivo referenciado no SQL Server não encontrado no filesystem
-                # Pode indicar: caminho errado, arquivo movido/deletado, ou permissão de acesso
-                print(
-                    f"⚠️ Alerta: Registro recebido, mas o arquivo não existe em: {path_pdf}")
+                # Arquivo não encontrado
+                print(f"❌ ERRO: O arquivo '{path_pdf}' não foi encontrado no container.")
+                print(f"   (Dica: Verifique se o nome no SQL coincide exatamente com o arquivo na pasta do projeto)")
 
 except KeyboardInterrupt:
     # Usuário pressionou Ctrl+C — encerramento gracioso e esperado

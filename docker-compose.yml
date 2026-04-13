@@ -60,6 +60,26 @@ services:
       - "traefik.http.middlewares.fastapi-limit.ratelimit.burst=5"
       - "traefik.http.routers.fastapi.middlewares=fastapi-limit"
 
+  # SERVIÇO: Motor de Processamento de PDFs (Ingestão RAG)
+  pdf_engine:
+    build: .
+    container_name: pdf_engine_rag
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - kafka
+      - debezium
+    volumes:
+      - .:/app
+      # MONTAGEM DE PDFs: 
+      # Mapeia a pasta de PDFs do host para /app/data no container
+      # AJUSTE AQUI: Mude o caminho da esquerda para a sua pasta real de PDFs
+      - .:/app/data 
+    command: python main.py
+
   # SERVIÇO: API Gateway (Traefik) - Rate Limiting & Proxy
   traefik:
     image: traefik:v2.10
