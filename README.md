@@ -70,4 +70,3 @@ docker-compose up -d --build
 - **`kafka/zookeeper` & `debezium`**: Infraestrutura de dados e eventos.
 
 ---
-*💡 Arquitetura focada na entrega de suporte inteligente e contextualizado para ambientes educacionais.*
