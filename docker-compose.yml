@@ -48,6 +48,7 @@ services:
       - "host.docker.internal:host-gateway" # Permite acesso ao SQL Server local
     volumes:
       - .:/app
+      - nemo_model_cache:/tmp/fastembed_cache  # Cache do modelo NeMo (evita download de 4-5min a cada restart)
     working_dir: /app
     command: uvicorn orquestrador:app --host 0.0.0.0 --port 8000 --reload
     labels:
@@ -77,7 +78,7 @@ services:
       # MONTAGEM DE PDFs: 
       # Mapeia a pasta de PDFs do host para /app/data no container
       # AJUSTE AQUI: Mude o caminho da esquerda para a sua pasta real de PDFs
-      - .:/app/data 
+      - .:/app/data
     command: python main.py
 
   # SERVIÇO: API Gateway (Traefik) - Rate Limiting & Proxy
@@ -94,3 +95,10 @@ services:
       - "8080:8080" # Dashboard visual
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
+
+# ─── Volumes Persistentes ─────────────────────────────────────────────────────
+volumes:
+  nemo_model_cache:
+    driver: local
+    # Persiste o modelo ONNX do NeMo Guardrails (all-MiniLM-L6-v2)
+    # Elimina o download de ~4 min do HuggingFace a cada reinicialização do container
